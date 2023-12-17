@@ -16,7 +16,7 @@ driver.implicitly_wait(5)
 
 print("Driver loaded successfully!")
 
-table = driver.find_element(By.XPATH,'//*[@id="OBS"]').get_attribute('outerHTML')
+table = driver.find_element(By.XPATH,'//*[@id="OBS_DATA"]').get_attribute('outerHTML')
 df = pd.read_html(StringIO(table))[0]
 
 #flip index order of table
