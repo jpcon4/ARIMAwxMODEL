@@ -1,74 +1,109 @@
+"""
+PART 1: WEB SCRAPING
+
+This part of the code is able to take a url of a timeseries viewer through the
+NWS Website and is able to spit out the past 720 hours of data in a dataframe.
+
+It also has an automatic stopping mechanism that stops the code from running if
+# of hours received is not equal to the desired/called hours of data.
+(this will be edited to be more of a fluid process soon)
+"""
+
+#dependencies
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 import pandas as pd
 from io import StringIO
 import math
+import sys
+import requests_cache
+from retry_requests import retry
+from datetime import datetime
+import pytz
 
 #adjust station according to desired station; station ID found on wrh.noaa.gov/map/
-#adjust hours as necessary to match df indices
-url = "https://www.weather.gov/wrh/timeseries?site=HRBC2&hours=472&hourly=true"
+#adjust hours as necessary
+url = "https://www.weather.gov/wrh/timeseries"
+
+#time calculation depending on current time to find # hours to call for web scrape (match index with API)
+now = datetime.now(pytz.utc)
+h = now.strftime("%H")
+h = int(float(h))-7
+
+site = "HRBC2"
+hours = 720-h
+
+url = url + f"?site={site}&hours={hours}&hourly=True"
 
 driver = webdriver.Chrome()
 driver.get(url)
 
-#let webpage load table
 driver.implicitly_wait(5)
 
-print("Driver loaded successfully!")
-
 table = driver.find_element(By.XPATH,'//*[@id="OBS_DATA"]').get_attribute('outerHTML')
-df = pd.read_html(StringIO(table))[0]
+df_table = pd.read_html(StringIO(table))[0]
 
 #flip index order of table
-df = df.iloc[::-1]
+df_table = df_table.iloc[::-1]
+print(df_table.head(3))
+#print resulting table to confirm first timeframes of historical data
+
+desired_length = hours
+
+# Check if the length of the dataframe is equal to the desired length
+if len(df_table) != desired_length:
+    print(f"The length of the dataframe is not equal to {desired_length}. Stopping the process.")
+    driver.close()
+    sys.exit(1)
+else:
+    print("The length of the dataframe is equal to the desired length. Continuing with the process.")
 
 #get lat, long, and elev data from station webpage
 location = driver.find_element(By.XPATH,'//*[@id="SITE"]/p').get_attribute('outerHTML')
 
-location_parse = location.split(" ")
-elev = location_parse[10]
-elev = math.ceil(float(elev))/3.28084
-coord = location_parse[13]
-coord = coord.split("/")
+location_parse = location.split("<br>")
+info = location_parse[2]
+info = info.split(" ")
+elev = math.ceil(float(info[1]))/3.28084 #3.28084 is factor to change feet -> meters
+coord = info[4].split("/")
 lat = float(coord[0])
-long = coord[1]
-long = long.split("<")
-long = float(long[0])
+long = float(coord[1])
 
 driver.close()
 
+"""
+PART 2: OPEN-METEO API
+
+Open-Meteo provides an easy, free call system for forecasts (even historical forecasts)
+
+The below script is their example script for calling from Python with slight
+param and end edits.
+"""
+
 import openmeteo_requests
-import requests_cache
-from retry_requests import retry
 
 # Setup the Open-Meteo API client with cache and retry on error
 cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
 retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
 openmeteo = openmeteo_requests.Client(session = retry_session)
 
-# Make sure all required weather variables are listed here
 # The order of variables in hourly or daily is important to assign them correctly below
 url = "https://api.open-meteo.com/v1/forecast"
 params = {
 	"latitude": lat,
 	"longitude": long,
-  "elevation": elev,
+    "elevation": elev,
 	"hourly": ["temperature_2m", "dew_point_2m", "precipitation", "pressure_msl", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "wind_speed_10m", "wind_gusts_10m"],
 	"temperature_unit": "fahrenheit",
 	"wind_speed_unit": "mph",
 	"precipitation_unit": "inch",
-	"timezone": "auto",
-	"past_days": 19,
+	"past_days": 30,
 	"models": "best_match"
 }
 responses = openmeteo.weather_api(url, params=params)
 
 # Process first location. Add a for-loop for multiple locations or weather models
 response = responses[0]
-print(f"Coordinates {response.Latitude()}°E {response.Longitude()}°N")
-print(f"Elevation {response.Elevation()} m asl")
-print(f"Timezone {response.Timezone()} {response.TimezoneAbbreviation()}")
-print(f"Timezone difference to GMT+0 {response.UtcOffsetSeconds()} s")
 
 # Process hourly data. The order of variables needs to be the same as requested.
 hourly = response.Hourly()
@@ -103,7 +138,12 @@ print(hourly_dataframe)
 
 hourly_data = hourly_dataframe.drop(['date'],axis=1)
 
-print("Historical weather forecast information processed!")
+"""
+PART 3: Data Processing
+
+This section makes sure to concat both of the dataframes as necessary for
+matching index values across data retrieved.
+"""
 
 import numpy as np
 
@@ -140,27 +180,35 @@ def justify(a, invalid_val=0, axis=1, side='left'):
     return out
 
 #process concat data
-df = pd.concat([df, hourly_data], axis=1)
+df = pd.concat([df_table, hourly_data], axis=1)
 arr = justify(df.to_numpy(), invalid_val=np.nan,axis=0)
 df = pd.DataFrame(arr, columns=df.columns, index=df.index)
 df = df.reset_index()
 df = df.drop(['index'], axis=1)
-df = df.iloc[:648]
+df = df.iloc[:int(float(len(hourly_dataframe)))]
 
-print("Dataframe setup complete!")
+"""
+PART 4: ARIMA Modeling
+
+This section runs the data that was gathered through the first three steps into
+an ARIMA (Auto(R)egressive Integrated Moving Average) model .
+
+This model finds a best fit for the data retrieved from the previous steps and
+outputs a forecast, which is also graphed in pyplot and visible in plot explorers.
+"""
 
 import matplotlib.pyplot as plt
 from skforecast.Sarimax import Sarimax
 import warnings
 warnings.filterwarnings('ignore')
 
-#number equals # hours (minus 1) in beginning url
-df1 = df.iloc[:471]
-df2 = df.iloc[471:]
+#number equals # hours in beginning url
+df1 = df.iloc[:(int(float(len(df_table)))-1)]
+df2 = df.iloc[(int(float(len(df_table)))-1):]
 temp = df1.columns[1]
 
 #customize for better results
-arima = Sarimax(order=(48, 1, 12))
+arima = Sarimax(order=(72, 1, 1),maxiter=250)
 arima.fit(y=df1[temp].astype(float),exog=df1[['temperature_2m','dew_point_2m','precipitation','pressure_msl','cloud_cover_low','cloud_cover_mid','cloud_cover_high','wind_speed_10m','wind_gusts_10m']].astype(float))
 arima.summary()
 
@@ -174,4 +222,5 @@ fig, ax = plt.subplots(figsize=(20,8))
 df[temp].plot(ax=ax, label='Actual')
 predictions.plot(ax=ax, label='Forecast')
 plt.grid(True)
+plt.title('HRBC2 (Harbison Meadow) Temperature Forecast')
 ax.legend()
