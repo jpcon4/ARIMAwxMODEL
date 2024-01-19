@@ -28,9 +28,9 @@ url = "https://www.weather.gov/wrh/timeseries"
 #time calculation depending on current time to find # hours to call for web scrape (match index with API)
 now = datetime.now(pytz.utc)
 h = now.strftime("%H")
-h = int(float(h))-7
+h = 23-int(float(h))
 
-site = "HRBC2"
+site = "K20V"
 hours = 720-h
 
 url = url + f"?site={site}&hours={hours}&hourly=True"
@@ -68,6 +68,8 @@ elev = math.ceil(float(info[1]))/3.28084 #3.28084 is factor to change feet -> me
 coord = info[4].split("/")
 lat = float(coord[0])
 long = float(coord[1])
+station_name = location_parse[1].split("(")
+station_name = station_name[0]
 
 driver.close()
 
@@ -134,7 +136,8 @@ hourly_data["wind_speed_10m"] = hourly_wind_speed_10m
 hourly_data["wind_gusts_10m"] = hourly_wind_gusts_10m
 
 hourly_dataframe = pd.DataFrame(data = hourly_data)
-print(hourly_dataframe)
+print(hourly_dataframe.head(3))
+#make sure match index with retrieved historical data (UTC time)
 
 hourly_data = hourly_dataframe.drop(['date'],axis=1)
 
@@ -203,24 +206,21 @@ import warnings
 warnings.filterwarnings('ignore')
 
 #number equals # hours in beginning url
-df1 = df.iloc[:(int(float(len(df_table)))-1)]
-df2 = df.iloc[(int(float(len(df_table)))-1):]
+df1 = df.iloc[:(int(float(len(df_table))))]
+df2 = df.iloc[(int(float(len(df_table)))):]
 temp = df1.columns[1]
 
 #customize for better results
-arima = Sarimax(order=(72, 1, 1),maxiter=250)
+arima = Sarimax(order=(72, 1, 24))
 arima.fit(y=df1[temp].astype(float),exog=df1[['temperature_2m','dew_point_2m','precipitation','pressure_msl','cloud_cover_low','cloud_cover_mid','cloud_cover_high','wind_speed_10m','wind_gusts_10m']].astype(float))
-arima.summary()
-
-print("ARIMA setup!")
 
 #customize steps number on how far ahead want to forecast
-predictions = arima.predict(steps=48,exog=df2[['temperature_2m','dew_point_2m','precipitation','pressure_msl','cloud_cover_low','cloud_cover_mid','cloud_cover_high','wind_speed_10m','wind_gusts_10m']].astype(float))
+predictions = arima.predict(steps=120,exog=df2[['temperature_2m','dew_point_2m','precipitation','pressure_msl','cloud_cover_low','cloud_cover_mid','cloud_cover_high','wind_speed_10m','wind_gusts_10m']].astype(float))
 
 #plot forecast
 fig, ax = plt.subplots(figsize=(20,8))
 df[temp].plot(ax=ax, label='Actual')
 predictions.plot(ax=ax, label='Forecast')
 plt.grid(True)
-plt.title('HRBC2 (Harbison Meadow) Temperature Forecast')
+plt.title(f'{station_name} Temperature Forecast')
 ax.legend()
